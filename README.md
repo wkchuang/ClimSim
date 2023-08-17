@@ -4,7 +4,7 @@
 
 # ClimSim: An open large-scale dataset for training high-resolution physics emulators in hybrid multi-scale climate simulators
 
-This repository contains the code necessary to download and preprocess the data, and create, train, and evaluate the baseline models in the paper.
+This repository contains the code necessary to download and preprocess the data, and create, train, and evaluate the baseline models in the [paper](https://arxiv.org/abs/2306.08754).
 
 ![fig_1](./fig_1.png)
 
