@@ -12,15 +12,16 @@ from tqdm import tqdm
 
 class data_utils:
     def __init__(self,
-                 data_path, 
                  grid_info,
-                 inp_mean,
-                 inp_max,
-                 inp_min,
-                 out_scale):
-        self.data_path = data_path
-        self.input_vars = None
-        self.target_vars = None
+                 input_mean,
+                 input_max,
+                 input_min,
+                 output_scale):
+        self.data_path = None
+        self.input_vars = []
+        self.target_vars = []
+        self.input_feature_len = None
+        self.target_feature_len = None
         self.grid_info = grid_info
         self.level_name = 'lev'
         self.sample_name = 'sample'
@@ -31,10 +32,10 @@ class data_utils:
         # map ncol to nsamples dimension
         # to_xarray = {'area_wgt':(self.sample_name,np.tile(self.grid_info['area_wgt'], int(n_samples/len(self.grid_info['ncol']))))}
         # to_xarray = xr.Dataset(to_xarray)
-        self.inp_mean = inp_mean
-        self.inp_max = inp_max
-        self.inp_min = inp_min
-        self.out_scale = out_scale
+        self.input_mean = input_mean
+        self.input_max = input_max
+        self.input_min = input_min
+        self.output_scale = output_scale
         self.lats, self.lats_indices = np.unique(self.grid_info['lat'].values, return_index=True)
         self.lons, self.lons_indices = np.unique(self.grid_info['lon'].values, return_index=True)
         self.sort_lat_key = np.argsort(self.grid_info['lat'].values[np.sort(self.lats_indices)])
@@ -134,32 +135,66 @@ class data_utils:
                                    'cam_out_SOLSD':1.,
                                    'cam_out_SOLLD':1.
                                   }
-        self.target_short_name = {'ptend_t': 'dT/dt', 
-                                  'ptend_q0001':'dq/dt', 
-                                  'cam_out_NETSW':  'NETSW',
-                                  'cam_out_FLWDS':  'FLWDS',
-                                  'cam_out_PRECSC': 'PRECSC',
-                                  'cam_out_PRECC': 'PRECC',
-                                  'cam_out_SOLS': 'SOLS',
-                                  'cam_out_SOLL': 'SOLL',
-                                  'cam_out_SOLSD': 'SOLSD',
-                                  'cam_out_SOLLD': 'SOLLD',
-                                  }
 
         # for metrics
-        self.crps_compatible = ["HSR", "RPN", "cVAE"]
-        self.samples_scoring = None
-        self.preds_scoring = None
+    
+        self.input_train = None
+        self.target_train = None
+        self.preds_train = None
+        self.samples_train = None
+        self.target_weighted_train = {}
+        self.preds_weighted_train = {}
+        self.samples_weighted_train = {}
+        self.metrics_train = []
+        self.metrics_idx_train = {}
+        self.metrics_var_train = {}
+
+        self.input_val = None
+        self.target_val = None
+        self.preds_val = None
+        self.samples_val = None
+        self.target_weighted_val = {}
+        self.preds_weighted_val = {}
+        self.samples_weighted_val = {}
+        self.metrics_val = []
+        self.metrics_idx_val = {}
+        self.metrics_var_val = {}
+        
         self.input_scoring = None
         self.target_scoring = None
-        self.model_names = None
-        self.metric_names = None
-        self.linecolors = {'CNN':  '#0072B2', 
-                           'HSR':  '#E69F00', 
-                           'MLP':  '#882255', 
-                           'RPN':  '#009E73', 
-                           'cVAE': '#D55E00' 
-                           }
+        self.preds_scoring = None
+        self.samples_scoring = None
+        self.target_weighted_scoring = {}
+        self.preds_weighted_scoring = {}
+        self.samples_weighted_scoring = {}
+        self.metrics_scoring = []
+        self.metrics_idx_scoring = {}
+        self.metrics_var_scoring = {}
+
+        self.input_test = None
+        self.target_test = None
+        self.preds_test = None
+        self.samples_test = None
+        self.target_weighted_test = {}
+        self.preds_weighted_test = {}
+        self.samples_weighted_test = {}
+        self.metrics_test = []
+        self.metrics_idx_test = {}
+        self.metrics_var_test = {}
+
+        self.model_names = []
+        self.metrics_names = []
+        self.metrics_dict = {'MAE': self.calc_MAE,
+                             'RMSE': self.calc_RMSE,
+                             'R2': self.calc_R2,
+                             'CRPS': self.calc_CRPS
+                            }
+        self.linecolors = ['#0072B2', 
+                           '#E69F00', 
+                           '#882255', 
+                           '#009E73', 
+                           '#D55E00'
+                           ]
 
     def set_to_v1_vars(self):
         '''
@@ -167,7 +202,8 @@ class data_utils:
         '''
         self.input_vars = self.v1_inputs
         self.target_vars = self.v1_outputs
-        return
+        self.input_feature_len = 124
+        self.target_feature_len = 128
 
     def get_xrdata(self, file, file_vars = None):
         '''
@@ -297,8 +333,8 @@ class data_utils:
                 ds_target = self.get_target(file)
                 
                 # normalization, scaling
-                ds_input = (ds_input - self.inp_mean)/(self.inp_max - self.inp_min)
-                ds_target = ds_target*self.out_scale
+                ds_input = (ds_input - self.input_mean)/(self.input_max - self.input_min)
+                ds_target = ds_target*self.output_scale
 
                 # stack
                 # ds = ds.stack({'batch':{'sample','ncol'}})
@@ -404,11 +440,11 @@ class data_utils:
         pred = np.array(hf.get('pred'))
         return pred
     
-    def set_pressure_grid(self, input):
+    def set_pressure_grid(self, input_arr):
         '''
         This function sets the pressure weighting for metrics.
         '''
-        state_ps = input[:,120]*(self.inp_max['state_ps'].values - self.inp_min['state_ps'].values) + self.inp_mean['state_ps'].values
+        state_ps = input_arr[:,120]*(self.input_max['state_ps'].values - self.input_min['state_ps'].values) + self.input_mean['state_ps'].values
         state_ps = np.reshape(state_ps, (-1, self.latlonnum))
         pressure_grid_p1 = np.array(self.grid_info['P0']*self.grid_info['hyai'])[:,np.newaxis,np.newaxis]
         pressure_grid_p2 = self.grid_info['hybi'].values[:, np.newaxis, np.newaxis] * state_ps[np.newaxis, :, :]
@@ -443,7 +479,7 @@ class data_utils:
         This function does four transformations, and assumes we are using V1 variables:
         [0] Undos the output scaling
         [1] Weight vertical levels by dp/g
-        [2] Weight horizontal area of each grid cell by a[x]/sum(a[x])
+        [2] Weight horizontal area of each grid cell by a[x]/mean(a[x])
         [3] Unit conversion to a common energy unit
         '''
         num_samples = output.shape[0]
@@ -463,16 +499,16 @@ class data_utils:
         # scalar_outputs = scalar_outputs.transpose((2,0,1))
 
         # [0] Undo output scaling
-        heating = heating/self.out_scale['ptend_t'].values[np.newaxis, np.newaxis, :]
-        moistening = moistening/self.out_scale['ptend_q0001'].values[np.newaxis, np.newaxis, :]
-        netsw = netsw/self.out_scale['cam_out_NETSW'].values
-        flwds = flwds/self.out_scale['cam_out_FLWDS'].values
-        precsc = precsc/self.out_scale['cam_out_PRECSC'].values
-        precc = precc/self.out_scale['cam_out_PRECC'].values
-        sols = sols/self.out_scale['cam_out_SOLS'].values
-        soll = soll/self.out_scale['cam_out_SOLL'].values
-        solsd = solsd/self.out_scale['cam_out_SOLSD'].values
-        solld = solld/self.out_scale['cam_out_SOLLD'].values
+        heating = heating/self.output_scale['ptend_t'].values[np.newaxis, np.newaxis, :]
+        moistening = moistening/self.output_scale['ptend_q0001'].values[np.newaxis, np.newaxis, :]
+        netsw = netsw/self.output_scale['cam_out_NETSW'].values
+        flwds = flwds/self.output_scale['cam_out_FLWDS'].values
+        precsc = precsc/self.output_scale['cam_out_PRECSC'].values
+        precc = precc/self.output_scale['cam_out_PRECC'].values
+        sols = sols/self.output_scale['cam_out_SOLS'].values
+        soll = soll/self.output_scale['cam_out_SOLL'].values
+        solsd = solsd/self.output_scale['cam_out_SOLSD'].values
+        solld = solld/self.output_scale['cam_out_SOLLD'].values
 
         # [1] Weight vertical levels by dp/g
         # only for vertically-resolved variables, e.g. ptend_{t,q0001}
@@ -503,76 +539,203 @@ class data_utils:
         soll = soll * self.target_energy_conv['cam_out_SOLL']
         solsd = solsd * self.target_energy_conv['cam_out_SOLSD']
         solld = solld * self.target_energy_conv['cam_out_SOLLD']
-        return {'heating':heating,
-                'moistening':moistening,
-                'netsw':netsw,
-                'flwds':flwds,
-                'precsc':precsc,
-                'precc':precc,
-                'sols':sols,
-                'soll':soll,
-                'solsd':solsd,
-                'solld':solld}
 
-    def calc_MAE(self, pred, actual):
-        '''
-        calculate mean absolute error 
-        for vertically-resolved variables, shape should be time x grid x level
-        for scalars, shape should be time x grid
-
-        returns vector of length level or 1
-        '''
-        assert pred.shape[1] == self.latlonnum
-        assert pred.shape == actual.shape
-        abs_diff = np.abs(pred - actual)
-        return abs_diff.mean(axis = (0,1))
+        return {'ptend_t':heating,
+                'ptend_q0001':moistening,
+                'cam_out_NETSW':netsw,
+                'cam_out_FLWDS':flwds,
+                'cam_out_PRECSC':precsc,
+                'cam_out_PRECC':precc,
+                'cam_out_SOLS':sols,
+                'cam_out_SOLL':soll,
+                'cam_out_SOLSD':solsd,
+                'cam_out_SOLLD':solld}
     
-    def calc_RMSE(self, pred, actual):
+    def reweight_target(self, data_split):
         '''
-        calculate area-reweighted root mean squared error 
+        data_split should be train, val, scoring, or test
+        weights target variables assuming V1 outputs using the output_weighting function
+        '''
+        assert data_split in ['train', 'val', 'scoring', 'test'], 'Provided data_split is not valid. Available options are train, val, scoring, and test.'
+        if data_split == 'train':
+            assert self.target_train is not None
+            self.target_weighted_train = self.output_weighting(self.target_train)
+        elif data_split == 'val':
+            assert self.target_val is not None
+            self.target_weighted_val = self.output_weighting(self.target_val)
+        elif data_split == 'scoring':
+            assert self.target_scoring is not None
+            self.target_weighted_scoring = self.output_weighting(self.target_scoring)
+        elif data_split == 'test':
+            assert self.target_test is not None
+            self.target_weighted_test = self.output_weighting(self.target_test)
+
+    def reweight_preds(self, data_split):
+        '''
+        weights predictions assuming V1 outputs using the output_weighting function
+        '''
+        assert data_split in ['train', 'val', 'scoring', 'test'], 'Provided data_split is not valid. Available options are train, val, scoring, and test.'
+        assert self.model_names is not None
+
+        if data_split == 'train':
+            assert self.preds_train is not None
+            for model_name in self.model_names:
+                self.preds_weighted_train[model_name] = self.output_weighting(self.preds_train[model_name])
+        elif data_split == 'val':
+            assert self.preds_val is not None
+            for model_name in self.model_names:
+                self.preds_weighted_val[model_name] = self.output_weighting(self.preds_val[model_name])
+        elif data_split == 'scoring':
+            assert self.preds_scoring is not None
+            for model_name in self.model_names:
+                self.preds_weighted_scoring[model_name] = self.output_weighting(self.preds_scoring[model_name])
+        elif data_split == 'test':
+            assert self.preds_test is not None
+            for model_name in self.model_names:
+                self.preds_weighted_test[model_name] = self.output_weighting(self.preds_test[model_name])
+
+    def calc_MAE(self, pred, target):
+        '''
+        calculate 'globally averaged' mean absolute error 
         for vertically-resolved variables, shape should be time x grid x level
         for scalars, shape should be time x grid
 
         returns vector of length level or 1
         '''
         assert pred.shape[1] == self.latlonnum
-        assert pred.shape == actual.shape
-        sq_diff = (pred - actual)**2
-        msq_diff = sq_diff.mean(axis = 0)
-        return np.sqrt(msq_diff).mean(axis = 0)
-
-    def calc_R2(self, pred, actual):
+        assert pred.shape == target.shape
+        mae = np.abs(pred - target).mean(axis = 0)
+        return mae.mean(axis = 0) # we decided to average globally at end
+    
+    def calc_RMSE(self, pred, target):
         '''
-        calculate R-squared
+        calculate 'globally averaged' root mean squared error 
         for vertically-resolved variables, shape should be time x grid x level
         for scalars, shape should be time x grid
 
         returns vector of length level or 1
         '''
         assert pred.shape[1] == self.latlonnum
-        assert pred.shape == actual.shape
-        sq_diff = (pred - actual)**2
-        var_time = (actual - actual.mean(axis = 0)[np.newaxis, :, :])**2
-        return (1 - sq_diff.mean(axis = 0)/var_time.mean(axis = 0)).mean(axis = 0)
+        assert pred.shape == target.shape
+        sq_diff = (pred - target)**2
+        rmse = np.sqrt(sq_diff.mean(axis = 0)) # mean over time
+        return rmse.mean(axis = 0) # we decided to separately average globally at end
 
-    def calc_CRPS(self, preds, actual):
+    def calc_R2(self, pred, target):
         '''
-        calculate continuous ranked probability score
-        for vertically-resolved variables, shape should be time x grid x level x num_crps_samples
-        for scalars, shape should be time x grid x num_crps_samples
+        calculate 'globally averaged' R-squared
+        for vertically-resolved variables, input shape should be time x grid x level
+        for scalars, input shape should be time x grid
+
+        returns vector of length level or 1
+        '''
+        assert pred.shape[1] == self.latlonnum
+        assert pred.shape == target.shape
+        sq_diff = (pred - target)**2
+        tss_time = (target - target.mean(axis = 0)[np.newaxis, ...])**2 # mean over time
+        r_squared = 1 - sq_diff.sum(axis = 0)/tss_time.sum(axis = 0) # sum over time
+        return r_squared.mean(axis = 0) # we decided to separately average globally at end
+
+    def calc_CRPS(self, preds, target):
+        '''
+        calculate 'globally averaged' continuous ranked probability score
+        for vertically-resolved variables, input shape should be time x grid x level x num_crps_samples
+        for scalars, input shape should be time x grid x num_crps_samples
+
+        returns vector of length level or 1
         '''
         assert preds.shape[1] == self.latlonnum
         num_crps = preds.shape[-1]
-        mae = np.mean(np.abs(preds - actual[..., np.newaxis]), axis = (0, 3))
-        pairwise_diffs = []
-        for i in range(num_crps):
-            for j in range(i+1, num_crps):
-                self_diff = np.abs(preds[...,i] - preds[...,j])
-                pairwise_diffs.append(self_diff)
-        sum_diffs = np.sum(pairwise_diffs)
-        crps = mae - sum_diffs/(num_crps*(num_crps-1)) 
-        # already divided by two from for loop count by exploiting symmetry, uses upper triangle of difference matrix, excluding diagonal
-        return crps
+        mae = np.mean(np.abs(preds - target[..., np.newaxis]), axis = (0, -1)) # mean over time and crps samples
+        diff = preds[..., 1:] - preds[..., :-1]
+        count = np.arange(1, num_crps) * np.arange(num_crps - 1, 0, -1)
+        spread = (diff * count[np.newaxis, np.newaxis, np.newaxis, :]).mean(axis = (0, -1)) # mean over time and crps samples
+        crps = mae - spread/(num_crps*(num_crps-1))
+        # already divided by two in spread by exploiting symmetry
+        return crps.mean(axis = 0) # we decided to separately average globally at end
+
+    def create_metrics_df(self, data_split):
+        '''
+        creates a dataframe of metrics for each model
+        '''
+        assert data_split in ['train', 'val', 'scoring', 'test'], \
+            'Provided data_split is not valid. Available options are train, val, scoring, and test.'
+        assert len(self.model_names) != 0
+        assert len(self.metrics_names) != 0
+        assert len(self.target_vars) != 0
+        assert self.target_feature_len is not None
+
+        if data_split == 'train':
+            assert len(self.preds_weighted_train) != 0
+            assert len(self.target_weighted_train) != 0
+            for model_name in self.model_names:
+                df_var = pd.DataFrame(columns = self.metrics_names, index = self.target_vars)
+                df_var.index.name = 'variable'
+                df_idx = pd.DataFrame(columns = self.metrics_names, index = range(self.target_feature_len))
+                df_idx.index.name = 'output_idx'
+                for metric_name in self.metrics_names:
+                    current_idx = 0
+                    for target_var in self.target_vars:
+                        metric = self.metrics_dict[metric_name](self.preds_weighted_train[model_name][target_var], self.target_weighted_train[target_var])
+                        df_var.loc[target_var, metric_name] = np.mean(metric)
+                        df_idx.loc[current_idx:current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
+                        current_idx += self.var_lens[target_var]
+                self.metrics_var_train[model_name] = df_var
+                self.metrics_idx_train[model_name] = df_idx
+
+        elif data_split == 'val':
+            assert len(self.preds_weighted_val) != 0
+            assert len(self.target_weighted_val) != 0
+            for model_name in self.model_names:
+                df_var = pd.DataFrame(columns = self.metrics_names, index = self.target_vars)
+                df_var.index.name = 'variable'
+                df_idx = pd.DataFrame(columns = self.metrics_names, index = range(self.target_feature_len))
+                df_idx.index.name = 'output_idx'
+                for metric_name in self.metrics_names:
+                    current_idx = 0
+                    for target_var in self.target_vars:
+                        metric = self.metrics_dict[metric_name](self.preds_weighted_val[model_name][target_var], self.target_weighted_val[target_var])
+                        df_var.loc[target_var, metric_name] = np.mean(metric)
+                        df_idx.loc[current_idx:current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
+                        current_idx += self.var_lens[target_var]
+                self.metrics_var_val[model_name] = df_var
+                self.metrics_idx_val[model_name] = df_idx
+
+        elif data_split == 'scoring':
+            assert len(self.preds_weighted_scoring) != 0
+            assert len(self.target_weighted_scoring) != 0
+            for model_name in self.model_names:
+                df_var = pd.DataFrame(columns = self.metrics_names, index = self.target_vars)
+                df_var.index.name = 'variable'
+                df_idx = pd.DataFrame(columns = self.metrics_names, index = range(self.target_feature_len))
+                df_idx.index.name = 'output_idx'
+                for metric_name in self.metrics_names:
+                    current_idx = 0
+                    for target_var in self.target_vars:
+                        metric = self.metrics_dict[metric_name](self.preds_weighted_scoring[model_name][target_var], self.target_weighted_scoring[target_var])
+                        df_var.loc[target_var, metric_name] = np.mean(metric)
+                        df_idx.loc[current_idx:current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
+                        current_idx += self.var_lens[target_var]
+                self.metrics_var_scoring[model_name] = df_var
+                self.metrics_idx_scoring[model_name] = df_idx
+
+        elif data_split == 'test':
+            assert len(self.preds_weighted_test) != 0
+            assert len(self.target_weighted_test) != 0
+            for model_name in self.model_names:
+                df_var = pd.DataFrame(columns = self.metrics_names, index = self.target_vars)
+                df_var.index.name = 'variable'
+                df_idx = pd.DataFrame(columns = self.metrics_names, index = range(self.target_feature_len))
+                df_idx.index.name = 'output_idx'
+                for metric_name in self.metrics_names:
+                    current_idx = 0
+                    for target_var in self.target_vars:
+                        metric = self.metrics_dict[metric_name](self.preds_weighted_test[model_name][target_var], self.target_weighted_test[target_var])
+                        df_var.loc[target_var, metric_name] = np.mean(metric)
+                        df_idx.loc[current_idx:current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
+                        current_idx += self.var_lens[target_var]
+                self.metrics_var_test[model_name] = df_var
+                self.metrics_idx_test[model_name] = df_idx
 
     def reshape_daily(self, output):
         '''
